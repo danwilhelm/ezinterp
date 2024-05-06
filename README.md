@@ -6,13 +6,14 @@ Minimalistic small/medium transformer interpretability library for interactive e
 
 
 Easily:
-- Access all intermediate model values.
-- Load, observe, and modify weights.
-- Selectively disable or re-route nearly every aspect of the model.
-- Compute special values useful for interpretability.
-
+- Easily import any GPT2-style model via `TransformerLens` or PTH files.
+- Selectively disable and re-route nearly every aspect of the model.
+- Source contains all computations on one screen (ensures same results as `TransformerLens`)
+- Load, observe, and modify weights per-run as `ndarrays`.
+- Access all intermediate model values as `ndarrays`.
+- Pre-computes special values useful for interpretability.
 
 To view available options, introspect one of the objects.
 
 
-**NOTE:** This is an early, preliminary version. Naming and capabilities are not yet finalized.
+**NOTE:** This is an early, preliminary version. Naming and capabilities are not yet finalized. Currently only works on GPT2-style models (e.g. gpt2, gelu-, ChessGPT)

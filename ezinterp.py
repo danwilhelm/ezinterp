@@ -17,6 +17,7 @@ To view available options, introspect one of the objects.
 
 import copy
 import numpy as np
+import pandas as pd
 
 class EZModel:
     '''Store/load model weights.'''
@@ -139,6 +140,35 @@ class EZModel:
 
         return tl_model
 
+    def search(self, phrase, use_case=False):
+        if use_case: idxs = [i for i,x in enumerate(self.vocab) if phrase in x]
+        else:        idxs = [i for i,x in enumerate(self.vocab) if phrase.lower() in x.lower()]
+
+        return pd.Series(self.decoder(idxs), index=idxs)
+
+    def filter(self, tokfunc):       
+        return np.array([i for i,x in enumerate(self.vocab) if tokfunc(x)])
+
+    def find(self, phrase):
+        if phrase.startswith(' '):
+            phrase = 'Ġ' + phrase[1:]
+        
+        idx = np.nonzero(self.vocab == phrase)[0]
+        if len(idx) > 0:
+            return int(idx[0])
+        else:
+            return '<not found>'
+
+    def findembed(self, phrase):
+        return self.embeds[self.find(phrase)]
+
+    def embedding(self, prompt, pos=True):
+        input_ids = prompt if type(prompt) is list else self.encoder(prompt)
+
+        out = self.embeds[input_ids].copy()
+        if pos: out += self.pos_embeds[:len(input_ids)]
+        return out
+
 
 class EZRun:
     '''Run a model and retain intermediate results.'''
@@ -146,7 +176,7 @@ class EZRun:
     SAVED_FIELDS = [
         'block_in', 'attn_in_normed', 'attn_out', 'mlp_in', 'mlp_in_normed', 'mlp_out',
         'block_out', 'attn_q', 'attn_k', 'attn_v', 'qk_out', 'masked_out', 'softmax_out', 
-        'heads_out', 'mlp_interm', 'mlp_actfn', 'logits', 'probs'
+        'heads_attn', 'heads_out', 'mlp_interm', 'mlp_actfn', 'logits', 'probs'
     ]
     
     def __init__(self, model, toks_in=None, **kwargs):
@@ -163,7 +193,7 @@ class EZRun:
                f'- IN: prompt, in_labels, in_toks, in_embeds, in_pos_embeds\n' +\
                f'- OUT: out_labels, out_toks, out (normed), logits, probs\n' +\
                f'- RESIDUAL STREAM: block_in, attn_in_normed, attn_out, mlp_in, mlp_in_normed, mlp_out, block_out\n' +\
-               f'- ATTN HEADS: attn_q, attn_k, attn_v, qk_out, masked_out, softmax_out, heads_out\n' +\
+               f'- ATTN HEADS: attn_q, attn_k, attn_v, qk_out, masked_out, softmax_out, heads_attn, heads_out\n' +\
                f'- MLP: mlp_interm, mlp_actfn\n'
                
     
@@ -192,6 +222,7 @@ class EZRun:
         self.qk_out = np.zeros((n_blocks, m.n_heads, self.n_toks, self.n_toks))  # each head's attn_q @ attn_k.T / sqrt(k_head)
         self.masked_out = np.zeros_like(self.qk_out)
         self.softmax_out = np.zeros_like(self.qk_out)        
+        self.heads_attn = np.zeros((n_blocks, m.n_heads, self.n_toks, m.k_head))   # each head following (softmax_out @ attn_in_normed) @ wv
         self.heads_out = np.zeros((n_blocks, m.n_heads, self.n_toks, m.k))    # each head following the output linear transform
 
         # MLP
@@ -253,7 +284,7 @@ class EZRun:
             self.in_toks = m.encoder(in_toks) if type(in_toks) is str else np.array(in_toks)
             self.n_toks = len(self.in_toks)
             self.in_embeds = m.embeds[self.in_toks]
-            self.in_pos_embeds = m.pos_embeds[:self.n_toks] if p['use_pos_embeds'] else np.zeros_like(self.embeds_in)
+            self.in_pos_embeds = m.pos_embeds[:self.n_toks] if p['use_pos_embeds'] else np.zeros_like(self.in_embeds)
             self.stream_in = self.in_embeds + self.in_pos_embeds
         else:
             self.in_labels = np.array([])
@@ -274,7 +305,7 @@ class EZRun:
             if p['use_attn']:
                 self.attn_in_normed[i] = m.zscores(attn_in) if p['attn_normalize'] else attn_in
                 self.attn_in_normed[i] = (self.attn_in_normed[i] @ m.wn1[b] + m.bn1[b]) if p['attn_norm'] else self.attn_in_normed[i]
-
+                
                 self.attn_q[i] = self.attn_in_normed[i] @ m.wq[b] + m.bq[b][:,np.newaxis]    # (n_toks,k) @ (n_heads,k,k_head) + (n_heads,1,k_head)
                 self.attn_k[i] = self.attn_in_normed[i] @ m.wk[b] + m.bk[b][:,np.newaxis]    #   => (n_heads,n_toks,k_head)
                 self.attn_v[i] = self.attn_in_normed[i] @ m.wv[b] + m.bv[b][:,np.newaxis]    # 
@@ -285,7 +316,8 @@ class EZRun:
                 self.softmax_out[i] = m.softmax(self.masked_out[i])
                 
                 # (n_heads, n_toks, n_toks) @ (n_heads, n_toks, k_head)  @ (n_heads, k_head, k) => (n_heads, n_toks, k)
-                self.heads_out[i] = self.softmax_out[i] @ self.attn_v[i] @ m.wo[b]
+                self.heads_attn[i] = self.softmax_out[i] @ self.attn_v[i]  # (n_heads, n_toks, k_head)
+                self.heads_out[i] = self.heads_attn[i] @ m.wo[b]
                 
                 self.attn_out[i] = np.sum(self.heads_out[i], axis=0) + (m.bo[b] if p['use_attn_bias'] else 0.0)     # (n_toks, k)
             
@@ -311,7 +343,7 @@ class EZRun:
         self.out = block_out
         self.logits = block_out @ m.wu + m.bu      # (n_toks,k) @ (k,n_classes) + (n_classes,1) => (n_toks,n_classes)
         self.probs = m.softmax(self.logits)
-        self.out_labels = np.argmax(self.probs, axis=1)
+        self.out_labels = np.argsort(-self.probs[-1])
         self.out_toks = m.decoder(self.out_labels)
         
         self.attn_in = self.block_in

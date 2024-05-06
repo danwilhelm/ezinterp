@@ -10,7 +10,27 @@ import numpy as np
 from ezinterp import EZModel, EZRun
 
 
-def pt_to_ez(pt_model, token_to_int=None):
+def tflens_to_ez(tlmodel, simplify=True):
+    state_dict = tlmodel.state_dict()
+
+    if simplify:
+        state_dict = tlmodel.center_writing_weights(state_dict)
+        state_dict = tlmodel.center_unembed(state_dict)
+        
+        attn_norm = any('ln1' in k for k in state_dict.keys())
+        if attn_norm:
+            state_dict = tlmodel.fold_layer_norm(state_dict)
+        
+        state_dict = tlmodel.fold_value_biases(state_dict)
+
+    m = pt_to_ez(state_dict,
+                 token_to_int=tlmodel.tokenizer.get_vocab(),
+                 encoder=lambda s: tlmodel.to_tokens(s).detach().cpu().numpy()[0])
+    
+    return m
+    
+
+def pt_to_ez(pt_model, token_to_int=None, tokenizer=None, encoder=None):
     '''
     Return an EZModel, given a PyTorch model.
     - pt_model: Either a PyTorch filename -or- PyTorch object.
@@ -50,15 +70,21 @@ def pt_to_ez(pt_model, token_to_int=None):
     
     m = EZModel()
 
+    if encoder:
+        m.encode = lambda tok: np.array(encoder(tok))
+        m.encoder = lambda toks: np.array(encoder(toks))
+    
     if token_to_int is not None:
         if type(token_to_int) is list or type(token_to_int) is np.array:
             token_to_int = {tok: i for i,tok in enumerate(token_to_int)}
         
         m.token_to_int = token_to_int
-        m.int_to_token = {i: tok for i,tok in enumerate(token_to_int)}
+        m.int_to_token = {i: tok for tok,i in token_to_int.items()}
         
-        m.encode = lambda c: m.token_to_int[c]   # single token -> int
-        m.encoder = lambda chars: np.array([m.token_to_int[c] for c in chars])  # iterable of tokens -> ints
+        if encoder is None:
+            m.encode = lambda c: m.token_to_int[c]   # single token -> int
+            m.encoder = lambda chars: np.array([m.token_to_int[c] for c in chars])  # iterable of tokens -> ints
+        
         m.decode = lambda tok: m.int_to_token[tok]
         m.decoder = lambda toks: np.array([m.int_to_token[tok] for tok in toks])
         m.vocab = np.array([tok for tok,i in sorted(m.token_to_int.items(), key=lambda x: x[1])])
@@ -100,15 +126,17 @@ def pt_to_ez(pt_model, token_to_int=None):
     return m
 
 
-def compare_tflens(inp, ezmodel, pt_model, device='cpu'):
+def compare_tflens(inp, ezmodel, tlmodel=None, ptmodel=None, device='cpu'):
     '''
     Compare how similar the ezmodel is to TransformerLens.
-    - pt_model: Either a PyTorch filename -or- PyTorch object.
+    - tlmodel: Specify a TransformerLens model directly.
+    - ptmodel: Either a PyTorch filename -or- PyTorch object.
     '''
 
-    tl_model = ezmodel.to_tflens(pt_model)
+    if not tlmodel and ptmodel:
+        tlmodel = ezmodel.to_tflens(ptmodel)
     
-    toks = ezmodel.encoder(inp, device=device)
+    toks = ezmodel.encoder(inp)
     ezrun = EZRun(ezmodel, toks)
     
     block_tl_ez = {
@@ -123,7 +151,7 @@ def compare_tflens(inp, ezmodel, pt_model, device='cpu'):
     }
     
     with t.inference_mode():
-        logits, cache = tl_model.run_with_cache(t.from_numpy(toks).to('cpu'))
+        logits, cache = tlmodel.run_with_cache(t.from_numpy(toks).to('cpu'))
         logits = logits.cpu().numpy()[0]
         probs = ezmodel.softmax(logits)
     
